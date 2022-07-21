@@ -124,7 +124,7 @@ class SN8Dataset(Dataset):
 
     def get_crop_transforms(self, crop : Tuple[int, int], data_to_load : dict):
         additional_targets = {key : "image" for key in data_to_load[1:]}
-        transform = Compose(RandomCrop(*crop, always_apply=True),
+        transform = Compose([RandomCrop(*crop, always_apply=True)],
                             additional_targets=additional_targets) 
         return transform
 

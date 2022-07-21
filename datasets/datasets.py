@@ -94,15 +94,17 @@ class SN8Dataset(Dataset):
             if returned_data[key] is not None:
                 returned_data[key] = torch.from_numpy(returned_data[key]).float().permute(2,0,1)
             else:
-                returned_data[key] = 0
+                returned_data[key] = None
 
+        if self.transforms is not None:
+            pass
 
-        out = [returned_data["preimg"], 
+        out = (returned_data["preimg"], 
                     returned_data["postimg"],
                     returned_data["building"],
                     returned_data["road"],
                     returned_data["roadspeed"],
-                    returned_data["flood"]]            
+                    returned_data["flood"])            
         return out
 
     def get_image_filename(self, index: int) -> str:

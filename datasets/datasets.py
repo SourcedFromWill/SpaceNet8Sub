@@ -51,21 +51,11 @@ class SN8Dataset(Dataset):
                 self.files.append(in_data)
         
         if crop:
-            # TODO make this crop specific to requested data types
-            self.crop = Compose([RandomCrop(*crop, always_apply=True),
-                                ],
-                                additional_targets={"preimg" : "image",
-                                                    "postimg" : "image",
-                                                    "flood" : "image",
-                                                    "building" : "image",
-                                                    "road" : "image",
-                                                    "roadspeed" : "image",
-                                                    "flood" : "image"},
-                                )
-            self.transforms = transforms
+           self.crop = self.get_crop_transforms(crop, data_to_load)
         else:
             self.crop = None
 
+        self.transforms = transforms
         print("loaded", len(self.files), "image filepaths")
 
     def __len__(self):
@@ -74,12 +64,10 @@ class SN8Dataset(Dataset):
     def __getitem__(self, index):
         data_dict = self.files[index]
 
-        returned_data = []
-        # print(self.all_data_types)
+        returned_data = {}
         for i in self.all_data_types:
             filepath = data_dict[i]
-            print(filepath)
-            if filepath is not None:
+            if filepath:
                 # need to resample postimg to same spatial resolution/extent as preimg and labels.
                 if i == "postimg":
                     ds = self.get_warped_ds(data_dict["postimg"])
@@ -93,28 +81,28 @@ class SN8Dataset(Dataset):
                 #     returned_data.append(torch.from_numpy(image).float())
                 
                 if len(image.shape)==2: 
-                    image = np.expand_dims(image, axis=0)
-                print(image.shape)
-                
-                returned_data.append(image.transpose())
+                    image = np.expand_dims(image, axis=0)                
+                returned_data[i] = image.transpose()
             
             else:
-                returned_data.append(0)
+                returned_data[i] = None
 
-        # for x, y in zip(self.all_data_types, returned_data):
-        #     print(x)
-        #     print(y)
-        
-        #print(returned_data)
         if self.crop:
-            out = self.crop(
-                    image = returned_data[0],
-                    postimg = returned_data[1],
-                    building = returned_data[2],
-                    road = returned_data[3],
-                    roadspeed = returned_data[4],
-                    flood = returned_data[5])
+            returned_data = self.crop_transform(returned_data)
         
+        for key in self.all_data_types: 
+            if returned_data[key] is not None:
+                returned_data[key] = torch.from_numpy(returned_data[key]).float().permute(2,0,1)
+            else:
+                returned_data[key] = 0
+
+
+        out = [returned_data["preimg"], 
+                    returned_data["postimg"],
+                    returned_data["building"],
+                    returned_data["road"],
+                    returned_data["roadspeed"],
+                    returned_data["flood"]]            
         return out
 
     def get_image_filename(self, index: int) -> str:
@@ -134,26 +122,50 @@ class SN8Dataset(Dataset):
                        outputType=gdal.GDT_Byte)
         return ds
 
+    def get_crop_transforms(self, crop : Tuple[int, int], data_to_load : dict):
+        additional_targets = {key : "image" for key in data_to_load[1:]}
+        transform = Compose(RandomCrop(*crop, always_apply=True),
+                            additional_targets=additional_targets) 
+        return transform
+
+    def crop_transform(self, data : dict):
+        crop_data = {}
+        crop_data["image"] = data[self.data_to_load[0]]
+        for key in self.data_to_load[1:]:
+            crop_data[key] = data[key]
+        crop_data = self.crop(**crop_data)
+        data[self.data_to_load[0]] = crop_data["image"]
+        for key in self.data_to_load[1:]:
+            data[key] = crop_data[key]    
+        return data
+
+    
+
 
 if __name__ == "__main__":
 
                             
     
     
-    train_dataset = SN8Dataset("/home/will/sn8/baseline/areas_of_interest/sn8_data_train.csv",
-                            data_to_load=["preimg","postimg","flood","building", "road", "roadspeed", "flood"],
+    train_dataset = SN8Dataset("areas_of_interest/sn8_data_train.csv",
+                            data_to_load=["preimg","postimg","flood"], # ,"building", "road", "roadspeed", "flood"],
                             img_size=(1300, 1300),
                             transforms=None,
                             crop=(512, 512))
     
-    import matplotlib.pyplot as plt
+    #print(train_dataset[30])
+    x = torch.utils.data.DataLoader(train_dataset,batch_size=1)
+    for i in x:
+        y, z, s, d, f, g = i
+        print(y)
+    # import matplotlib.pyplot as plt
 
-    for x, image in enumerate(train_dataset):
+    # for x, image in enumerate(train_dataset):
             
-        plt.imshow(image["image"])
-        plt.savefig(f"testfiles/test{x}-pre.png")
-        plt.imshow(image["postimg"])
-        plt.savefig(f"testfiles/test{x}-post.png")
-        plt.show()
+    #     plt.imshow(image["image"])
+    #     plt.savefig(f"testfiles/test{x}-pre.png")
+    #     plt.imshow(image["postimg"])
+    #     plt.savefig(f"testfiles/test{x}-post.png")
+    #     plt.show()
 
     

@@ -1,0 +1,9 @@
+flood_trained.pth
+foundation_trained.pth
+logdir/flood/*
+logdir/foundation/*
+inspect/flood/*
+inspect/foundation/*
+areas_of_interest/Germany_Training_Public
+areas_of_interest/Louisiana-East_Training_Public
+core/__pycache__

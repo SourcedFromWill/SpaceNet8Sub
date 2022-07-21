@@ -7,3 +7,4 @@ inspect/foundation/*
 areas_of_interest/Germany_Training_Public
 areas_of_interest/Louisiana-East_Training_Public
 core/__pycache__
+testfiles/*

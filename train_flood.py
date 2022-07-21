@@ -80,10 +80,7 @@ if __name__ ==  "__main__":
     save_dir = args.save_dir
     model_name = args.model_name
     initial_lr = args.lr
-    batch_size = args.batch_size
-    n_epochs = args.n_epochs
-    gpu = args.gpu
-    
+    batch_size = argdataset = SN8Dataset()
     now = datetime.now() 
     date_total = str(now.strftime("%d-%m-%Y-%H-%M"))
 

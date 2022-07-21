@@ -7,13 +7,15 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-import albumentations
+from albumentations import RandomCrop, Compose, Normalize
 
 class SN8Dataset(Dataset):
     def __init__(self,
                  csv_filename: str,
                  data_to_load: List[str] = ["preimg","postimg","building","road","roadspeed","flood"],
-                 img_size: Tuple[int, int] = (1300,1300)):
+                 img_size: Tuple[int, int] = (1300,1300),
+                 transforms=None,
+                 crop=None):
         """ pytorch dataset for spacenet-8 data. loads images from a csv that contains filepaths to the images
         
         Parameters:
@@ -48,6 +50,22 @@ class SN8Dataset(Dataset):
                     in_data[j]=row[j]
                 self.files.append(in_data)
         
+        if crop:
+            # TODO make this crop specific to requested data types
+            self.crop = Compose([RandomCrop(*crop, always_apply=True),
+                                ],
+                                additional_targets={"preimg" : "image",
+                                                    "postimg" : "image",
+                                                    "flood" : "image",
+                                                    "building" : "image",
+                                                    "road" : "image",
+                                                    "roadspeed" : "image",
+                                                    "flood" : "image"},
+                                )
+            self.transforms = transforms
+        else:
+            self.crop = None
+
         print("loaded", len(self.files), "image filepaths")
 
     def __len__(self):
@@ -57,8 +75,10 @@ class SN8Dataset(Dataset):
         data_dict = self.files[index]
 
         returned_data = []
+        # print(self.all_data_types)
         for i in self.all_data_types:
             filepath = data_dict[i]
+            print(filepath)
             if filepath is not None:
                 # need to resample postimg to same spatial resolution/extent as preimg and labels.
                 if i == "postimg":
@@ -67,15 +87,35 @@ class SN8Dataset(Dataset):
                     ds = gdal.Open(filepath)
                 image = ds.ReadAsArray()
                 ds = None
-                if len(image.shape)==2: # add a channel axis if read image is only shape (H,W).
-                    returned_data.append(torch.unsqueeze(torch.from_numpy(image), dim=0).float())
-                else:
-                    returned_data.append(torch.from_numpy(image).float())
+                # if len(image.shape)==2: # add a channel axis if read image is only shape (H,W).
+                #     returned_data.append(torch.unsqueeze(torch.from_numpy(image), dim=0).float())
+                # else:
+                #     returned_data.append(torch.from_numpy(image).float())
+                
+                if len(image.shape)==2: 
+                    image = np.expand_dims(image, axis=0)
+                print(image.shape)
+                
+                returned_data.append(image.transpose())
+            
             else:
                 returned_data.append(0)
 
-        print(returned_data)
-        return returned_data
+        # for x, y in zip(self.all_data_types, returned_data):
+        #     print(x)
+        #     print(y)
+        
+        #print(returned_data)
+        if self.crop:
+            out = self.crop(
+                    image = returned_data[0],
+                    postimg = returned_data[1],
+                    building = returned_data[2],
+                    road = returned_data[3],
+                    roadspeed = returned_data[4],
+                    flood = returned_data[5])
+        
+        return out
 
     def get_image_filename(self, index: int) -> str:
         """ return pre-event image absolute filepath at index """
@@ -96,6 +136,24 @@ class SN8Dataset(Dataset):
 
 
 if __name__ == "__main__":
-    train_dataset = SN8Dataset(train_csv,
-                            data_to_load=["preimg","postimg","flood"],
-                            img_size=img_size)
+
+                            
+    
+    
+    train_dataset = SN8Dataset("/home/will/sn8/baseline/areas_of_interest/sn8_data_train.csv",
+                            data_to_load=["preimg","postimg","flood","building", "road", "roadspeed", "flood"],
+                            img_size=(1300, 1300),
+                            transforms=None,
+                            crop=(512, 512))
+    
+    import matplotlib.pyplot as plt
+
+    for x, image in enumerate(train_dataset):
+            
+        plt.imshow(image["image"])
+        plt.savefig(f"testfiles/test{x}-pre.png")
+        plt.imshow(image["postimg"])
+        plt.savefig(f"testfiles/test{x}-post.png")
+        plt.show()
+
+    

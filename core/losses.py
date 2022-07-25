@@ -1,6 +1,7 @@
 """ loss functions. also found in cresi repo """
 import torch
 
+# Note that eps must be less than 1e-8 when using FP16
 def soft_dice_loss(outputs, targets, per_image=False):
     '''
     From cannab sn4
@@ -8,7 +9,7 @@ def soft_dice_loss(outputs, targets, per_image=False):
     
     batch_size = outputs.size()
     # batch_size = outputs.size()[0]
-    eps = 1e-5
+    eps = 1e-7
     if not per_image:
         batch_size = 1
     dice_target = targets.contiguous().view(batch_size, -1).float()
@@ -23,7 +24,7 @@ def focal(outputs, targets, gamma=2,  ignore_index=255):
     '''From cannab sn4'''
     outputs = outputs.contiguous()
     targets = targets.contiguous()
-    eps = 1e-8
+    eps = 1e-7
     non_ignored = targets.view(-1) != ignore_index
     targets = targets.view(-1)[non_ignored].float()
     outputs = outputs.contiguous().view(-1)[non_ignored]

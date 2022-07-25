@@ -2,7 +2,7 @@ import csv
 import os
 import argparse
 from datetime import datetime
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
@@ -55,7 +55,7 @@ def write_metrics_epoch(epoch, fieldnames, train_metrics, val_metrics, training_
         writer.writerow(merged_metrics)
 
 def log_to_tensorboard(writer, metrics, n_iter):
-    for key, value in metrics:
+    for key, value in metrics.items():
         writer.add_scalar(key, value, n_iter)
 
 def save_model_checkpoint(model, checkpoint_model_path): 
@@ -85,7 +85,6 @@ if __name__ == "__main__":
     n_epochs = args.n_epochs
     gpu = args.gpu
     config = FoundationConfig()
-    writer = SummaryWriter()
 
     now = datetime.now() 
     date_total = str(now.strftime("%d-%m-%Y-%H-%M"))
@@ -102,6 +101,7 @@ if __name__ == "__main__":
     SEED=12
     torch.manual_seed(SEED)
 
+    # TODO make these work even if the directories don't already exist
     assert(os.path.exists(save_dir))
     save_dir = os.path.join(save_dir, f"{model_name}_lr{'{:.2e}'.format(initial_lr)}_bs{batch_size}_{date_total}")
     if not os.path.exists(save_dir):
@@ -117,6 +117,8 @@ if __name__ == "__main__":
                                      'val_tot_loss', 'val_bce', 'val_dice', 'val_focal', 'val_road_loss']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
+    # TODO change name
+    writer = SummaryWriter()
 
     train_transforms, validation_transforms = get_transforms()
     train_dataset = SN8Dataset(train_csv,
@@ -140,7 +142,7 @@ if __name__ == "__main__":
     
     model.to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, eps=1e-7)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 
                             step_size=40, gamma=0.5)
     scaler = torch.cuda.amp.GradScaler(enabled=config.MIXED_PRECISION)
@@ -158,44 +160,43 @@ if __name__ == "__main__":
         train_bce_loss = 0
         train_road_loss = 0
         train_building_loss = 0
-        for i, data in tqdm(enumerate(train_dataloader), ):
-            optimizer.zero_grad()
+        with tqdm(enumerate(train_dataloader), unit="batch", total=len(train_dataloader)) as tepoch:
+            for i, data in tepoch:
+                optimizer.zero_grad()
 
-            preimg, postimg, building, road, roadspeed, flood = data
+                preimg, postimg, building, road, roadspeed, flood = data
 
-            preimg = preimg.to(device).float()
-            roadspeed = roadspeed.to(device).float()
-            building = building.to(device).float()
+                preimg = preimg.to(device).float()
+                roadspeed = roadspeed.to(device).float()
+                building = building.to(device).float()
 
-            with torch.cuda.amp.autocast(enabled=config.MIXED_PRECISION):
-                building_pred, road_pred = model(preimg)
-                bce_l = bceloss.forward(building_pred, building)
-                y_pred = F.sigmoid(road_pred)
+                with torch.cuda.amp.autocast(enabled=config.MIXED_PRECISION):
+                    building_pred, road_pred = model(preimg)
+                    bce_l = bceloss.forward(building_pred, building)
+                    y_pred = torch.sigmoid(road_pred)
 
-                focal_l = focal(y_pred, roadspeed)
-                dice_soft_l = soft_dice_loss(y_pred, roadspeed)
+                    focal_l = focal(y_pred, roadspeed)
+                    dice_soft_l = soft_dice_loss(y_pred, roadspeed)
 
-                road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
-                building_loss = bce_l
-                loss = road_loss_weight * road_loss + building_loss_weight * building_loss
+                    road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
+                    building_loss = bce_l
+                    loss = road_loss_weight * road_loss + building_loss_weight * building_loss
+                    train_loss_val+=loss
+                    train_focal_loss += focal_l
+                    train_soft_dice_loss += dice_soft_l
+                    train_bce_loss += bce_l
+                    train_road_loss += road_loss
+                
 
-                train_loss_val+=loss
-                train_focal_loss += focal_l
-                train_soft_dice_loss += dice_soft_l
-                train_bce_loss += bce_l
-                train_road_loss += road_loss
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                tepoch.set_postfix(loss=(train_loss_val*1.0/(i+1)).item())
+                
+                n_iter = epoch * len(train_dataloader) + i
+                writer.add_scalar("training_loss_step", loss, n_iter)
             
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            print(f"    {str(np.round(i/len(train_dataloader)*100,2))}%: TRAIN LOSS: {(train_loss_val*1.0/(i+1)).item()}", end="\r")
-            
-            n_iter = epoch * len(train_dataloader) + i
-            writer.add_scalar("training_loss_step", train_loss_val, n_iter)
-            if i == 0 and epoch == 0:
-                writer.add_graph()
         
         print()
         train_tot_loss = (train_loss_val*1.0/len(train_dataloader)).item()
@@ -208,6 +209,7 @@ if __name__ == "__main__":
         train_metrics = {"lr":current_lr, "train_tot_loss":train_tot_loss,
                          "train_bce":train_tot_bce, "train_focal":train_tot_focal,
                          "train_dice":train_tot_dice, "train_road_loss":train_tot_road_loss}
+        
         log_to_tensorboard(writer, train_metrics, epoch)
 
         # validation
@@ -217,29 +219,31 @@ if __name__ == "__main__":
         val_soft_dice_loss = 0
         val_bce_loss = 0
         val_road_loss = 0
+        # TODO why is validation loader slower than training loader?
         with torch.no_grad():
-            for i, data in enumerate(val_dataloader):
+            for i, data in tqdm(enumerate(val_dataloader)):
                 preimg, postimg, building, road, roadspeed, flood = data
-                preimg = preimg.to(device).float()
-                roadspeed = roadspeed.to(device).float()
-                building = building.to(device).float()
+                preimg = preimg.to(device)
+                roadspeed = roadspeed.to(device)
+                building = building.to(device)
 
-                building_pred, road_pred = model(preimg)
-                bce_l = bceloss(building_pred, building)
-                y_pred = F.sigmoid(road_pred)
+                with torch.cuda.amp.autocast(enabled=config.MIXED_PRECISION):
+                    building_pred, road_pred = model(preimg)
+                    bce_l = bceloss(building_pred, building)
+                    y_pred = torch.sigmoid(road_pred)
 
-                focal_l = focal(y_pred, roadspeed)
-                dice_soft_l = soft_dice_loss(y_pred, roadspeed)
+                    focal_l = focal(y_pred, roadspeed)
+                    dice_soft_l = soft_dice_loss(y_pred, roadspeed)
 
-                road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
-                building_loss = bce_l
-                loss = road_loss_weight * road_loss + building_loss_weight * building_loss
+                    road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
+                    building_loss = bce_l
+                    loss = road_loss_weight * road_loss + building_loss_weight * building_loss
 
-                val_focal_loss += focal_l
-                val_soft_dice_loss += dice_soft_l
-                val_bce_loss += bce_l
-                val_loss_val += loss
-                val_road_loss += road_loss
+                    val_focal_loss += focal_l
+                    val_soft_dice_loss += dice_soft_l
+                    val_bce_loss += bce_l
+                    val_loss_val += loss
+                    val_road_loss += road_loss
 
                 print(f"    {str(np.round(i/len(val_dataloader)*100,2))}%: VAL LOSS: {(val_loss_val*1.0/(i+1)).item()}", end="\r")
 

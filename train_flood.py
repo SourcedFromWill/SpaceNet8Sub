@@ -58,7 +58,8 @@ def write_metrics_epoch(epoch, fieldnames, train_metrics, val_metrics, training_
 
 def log_to_tensorboard(writer, metrics, n_iter):
     for key, value in metrics:
-        writer.add_scalar(key, value, n_iter)
+        print(key, value)
+        writer.add_scalar(key, value,global_step=n_iter)
         
 def save_model_checkpoint(model, checkpoint_model_path): 
     torch.save(model.state_dict(), checkpoint_model_path)
@@ -92,7 +93,6 @@ if __name__ ==  "__main__":
     n_epochs = args.n_epochs
     gpu = args.gpu
     config = FloodConfig()
-    writer = SummaryWriter()
     
     now = datetime.now() 
     date_total = str(now.strftime("%d-%m-%Y-%H-%M"))
@@ -136,12 +136,12 @@ if __name__ ==  "__main__":
                             data_to_load=["preimg","postimg","flood"],
                             img_size=img_size,
                             train_transforms=train_transforms)
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, shuffle=True, num_workers=2, batch_size=batch_size)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, shuffle=True, num_workers=4, batch_size=batch_size)
     val_dataset = SN8Dataset(val_csv,
                             data_to_load=["preimg","postimg","flood"],
                             img_size=img_size,
                             validation_transforms=validation_transforms)
-    val_dataloader = torch.utils.data.DataLoader(val_dataset, num_workers=2, batch_size=batch_size)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, num_workers=4, batch_size=batch_size)
 
     #model = models["resnet34"](num_classes=5, num_channels=6)
     if model_name == "unet_siamese":

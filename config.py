@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 @dataclass
 class FoundationConfig:
-    MIXED_PRECISION : bool = False
+    MIXED_PRECISION : bool = True
 
 @dataclass
 class FloodConfig:

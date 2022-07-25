@@ -1,4 +1,7 @@
+from typing import Tuple
+from cv2 import transform
 from osgeo import gdal
+from albumentations import Compose, Normalize, RandomCrop
 
 def write_geotiff(output_tif, ncols, nrows,
                   xmin, xres,ymax, yres,
@@ -13,3 +16,14 @@ def write_geotiff(output_tif, ncols, nrows,
         #outband.SetNoDataValue(0)
         outband.FlushCache()
     out_ds = None
+
+def get_transforms(crop=(512, 512), normalize=True) -> Tuple[list, list]:
+    train_transforms = list()
+    validation_tranforms = list()
+    if crop is not None:
+        train_transforms.append(RandomCrop(*crop, always_apply=True))
+    if normalize:
+        train_transforms.append(Normalize())
+        validation_tranforms.append(Normalize())
+    return train_transforms, validation_tranforms
+

@@ -2,16 +2,21 @@ import csv
 import os
 import argparse
 from datetime import datetime
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 from datasets.datasets import SN8Dataset
 from core.losses import focal, soft_dice_loss
 import models.pytorch_zoo.unet as unet
 from models.other.unet import UNet
+from utils.utils import get_transforms
+from config import FoundationConfig
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -48,9 +53,14 @@ def write_metrics_epoch(epoch, fieldnames, train_metrics, val_metrics, training_
     with open(training_log_csv, 'a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writerow(merged_metrics)
-        
+
+def log_to_tensorboard(writer, metrics, n_iter):
+    for key, value in metrics.items():
+        writer.add_scalar(key, value, n_iter)
+
 def save_model_checkpoint(model, checkpoint_model_path): 
     torch.save(model.state_dict(), checkpoint_model_path)
+
 
 models = {
     'resnet34': unet.Resnet34_upsample,
@@ -74,6 +84,7 @@ if __name__ == "__main__":
     batch_size = args.batch_size
     n_epochs = args.n_epochs
     gpu = args.gpu
+    config = FoundationConfig()
 
     now = datetime.now() 
     date_total = str(now.strftime("%d-%m-%Y-%H-%M"))
@@ -86,10 +97,11 @@ if __name__ == "__main__":
     building_loss_weight = 0.5
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
-
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     SEED=12
     torch.manual_seed(SEED)
 
+    # TODO make these work even if the directories don't already exist
     assert(os.path.exists(save_dir))
     save_dir = os.path.join(save_dir, f"{model_name}_lr{'{:.2e}'.format(initial_lr)}_bs{batch_size}_{date_total}")
     if not os.path.exists(save_dir):
@@ -105,16 +117,21 @@ if __name__ == "__main__":
                                      'val_tot_loss', 'val_bce', 'val_dice', 'val_focal', 'val_road_loss']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
+    # TODO change name
+    writer = SummaryWriter()
 
+    train_transforms, validation_transforms = get_transforms()
     train_dataset = SN8Dataset(train_csv,
                             data_to_load=["preimg","building","roadspeed"],
-                            img_size=img_size)
+                            img_size=img_size,
+                            transforms=train_transforms)
     train_dataloader = torch.utils.data.DataLoader(train_dataset,
              shuffle=True, num_workers=4, 
              batch_size=batch_size)
     val_dataset = SN8Dataset(val_csv,
                             data_to_load=["preimg","building","roadspeed"],
-                            img_size=img_size)
+                            img_size=img_size,
+                            transforms=validation_transforms)
     val_dataloader = torch.utils.data.DataLoader(val_dataset, num_workers=4, batch_size=batch_size)
 
     #model = models["resnet34"](num_classes=[1, 8], num_channels=3)
@@ -123,10 +140,12 @@ if __name__ == "__main__":
     else:
         model = models[model_name](num_classes=[1, 8], num_channels=3)
     
-    model.cuda()
-    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
+    model.to(device)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, eps=1e-7)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 
                             step_size=40, gamma=0.5)
+    scaler = torch.cuda.amp.GradScaler(enabled=config.MIXED_PRECISION)
     bceloss = nn.BCEWithLogitsLoss()
 
     best_loss = np.inf
@@ -141,35 +160,44 @@ if __name__ == "__main__":
         train_bce_loss = 0
         train_road_loss = 0
         train_building_loss = 0
-        for i, data in enumerate(train_dataloader):
-            optimizer.zero_grad()
+        with tqdm(enumerate(train_dataloader), unit="batch", total=len(train_dataloader)) as tepoch:
+            for i, data in tepoch:
+                optimizer.zero_grad()
 
-            preimg, postimg, building, road, roadspeed, flood = data
+                preimg, postimg, building, road, roadspeed, flood = data
 
-            preimg = preimg.cuda().float()
-            roadspeed = roadspeed.cuda().float()
-            building = building.cuda().float()
+                preimg = preimg.to(device).float()
+                roadspeed = roadspeed.to(device).float()
+                building = building.to(device).float()
 
-            building_pred, road_pred = model(preimg)
-            bce_l = bceloss.forward(building_pred, building)
-            y_pred = F.sigmoid(road_pred)
+                with torch.cuda.amp.autocast(enabled=config.MIXED_PRECISION):
+                    building_pred, road_pred = model(preimg)
+                    bce_l = bceloss.forward(building_pred, building)
+                    y_pred = torch.sigmoid(road_pred)
 
-            focal_l = focal(y_pred, roadspeed)
-            dice_soft_l = soft_dice_loss(y_pred, roadspeed)
+                    focal_l = focal(y_pred, roadspeed)
+                    dice_soft_l = soft_dice_loss(y_pred, roadspeed)
 
-            road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
-            building_loss = bce_l
-            loss = road_loss_weight * road_loss + building_loss_weight * building_loss
+                    road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
+                    building_loss = bce_l
+                    loss = road_loss_weight * road_loss + building_loss_weight * building_loss
+                    train_loss_val+=loss
+                    train_focal_loss += focal_l
+                    train_soft_dice_loss += dice_soft_l
+                    train_bce_loss += bce_l
+                    train_road_loss += road_loss
+                
 
-            train_loss_val+=loss
-            train_focal_loss += focal_l
-            train_soft_dice_loss += dice_soft_l
-            train_bce_loss += bce_l
-            train_road_loss += road_loss
-            loss.backward()
-            optimizer.step()
-
-            print(f"    {str(np.round(i/len(train_dataloader)*100,2))}%: TRAIN LOSS: {(train_loss_val*1.0/(i+1)).item()}", end="\r")
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                tepoch.set_postfix(loss=(train_loss_val*1.0/(i+1)).item())
+                
+                n_iter = epoch * len(train_dataloader) + i
+                writer.add_scalar("training_loss_step", loss, n_iter)
+            
+        
         print()
         train_tot_loss = (train_loss_val*1.0/len(train_dataloader)).item()
         train_tot_focal = (train_focal_loss*1.0/len(train_dataloader)).item()
@@ -181,6 +209,8 @@ if __name__ == "__main__":
         train_metrics = {"lr":current_lr, "train_tot_loss":train_tot_loss,
                          "train_bce":train_tot_bce, "train_focal":train_tot_focal,
                          "train_dice":train_tot_dice, "train_road_loss":train_tot_road_loss}
+        
+        log_to_tensorboard(writer, train_metrics, epoch)
 
         # validation
         model.eval()
@@ -189,29 +219,31 @@ if __name__ == "__main__":
         val_soft_dice_loss = 0
         val_bce_loss = 0
         val_road_loss = 0
+        # TODO why is validation loader slower than training loader?
         with torch.no_grad():
-            for i, data in enumerate(val_dataloader):
+            for i, data in tqdm(enumerate(val_dataloader)):
                 preimg, postimg, building, road, roadspeed, flood = data
-                preimg = preimg.cuda().float()
-                roadspeed = roadspeed.cuda().float()
-                building = building.cuda().float()
+                preimg = preimg.to(device)
+                roadspeed = roadspeed.to(device)
+                building = building.to(device)
 
-                building_pred, road_pred = model(preimg)
-                bce_l = bceloss(building_pred, building)
-                y_pred = F.sigmoid(road_pred)
+                with torch.cuda.amp.autocast(enabled=config.MIXED_PRECISION):
+                    building_pred, road_pred = model(preimg)
+                    bce_l = bceloss(building_pred, building)
+                    y_pred = torch.sigmoid(road_pred)
 
-                focal_l = focal(y_pred, roadspeed)
-                dice_soft_l = soft_dice_loss(y_pred, roadspeed)
+                    focal_l = focal(y_pred, roadspeed)
+                    dice_soft_l = soft_dice_loss(y_pred, roadspeed)
 
-                road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
-                building_loss = bce_l
-                loss = road_loss_weight * road_loss + building_loss_weight * building_loss
+                    road_loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
+                    building_loss = bce_l
+                    loss = road_loss_weight * road_loss + building_loss_weight * building_loss
 
-                val_focal_loss += focal_l
-                val_soft_dice_loss += dice_soft_l
-                val_bce_loss += bce_l
-                val_loss_val += loss
-                val_road_loss += road_loss
+                    val_focal_loss += focal_l
+                    val_soft_dice_loss += dice_soft_l
+                    val_bce_loss += bce_l
+                    val_loss_val += loss
+                    val_road_loss += road_loss
 
                 print(f"    {str(np.round(i/len(val_dataloader)*100,2))}%: VAL LOSS: {(val_loss_val*1.0/(i+1)).item()}", end="\r")
 
@@ -225,6 +257,7 @@ if __name__ == "__main__":
                        "val_focal":val_tot_focal, "val_dice":val_tot_dice, "val_road_loss":val_tot_road_loss}
 
         write_metrics_epoch(epoch, fieldnames, train_metrics, val_metrics, training_log_csv)
+        log_to_tensorboard(writer, val_metrics, epoch)
 
         save_model_checkpoint(model, checkpoint_model_path)
 

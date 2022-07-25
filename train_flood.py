@@ -7,13 +7,17 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import numpy as np
-from torchvision import transforms
+from torch.utils.tensorboard import SummaryWriter
+
 
 from datasets.datasets import SN8Dataset
 import models.pytorch_zoo.unet as unet
 from models.other.unet import UNetSiamese
 from models.other.siamunetdif import SiamUnet_diff
 from models.other.siamnestedunet import SNUNet_ECAM
+from utils.utils import get_transforms
+from config import FloodConfig
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -51,6 +55,11 @@ def write_metrics_epoch(epoch, fieldnames, train_metrics, val_metrics, training_
     with open(training_log_csv, 'a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writerow(merged_metrics)
+
+def log_to_tensorboard(writer, metrics, n_iter):
+    for key, value in metrics:
+        print(key, value)
+        writer.add_scalar(key, value,global_step=n_iter)
         
 def save_model_checkpoint(model, checkpoint_model_path): 
     torch.save(model.state_dict(), checkpoint_model_path)
@@ -83,6 +92,7 @@ if __name__ ==  "__main__":
     batch_size = args.batch_size
     n_epochs = args.n_epochs
     gpu = args.gpu
+    config = FloodConfig()
     
     now = datetime.now() 
     date_total = str(now.strftime("%d-%m-%Y-%H-%M"))
@@ -119,15 +129,19 @@ if __name__ ==  "__main__":
                                      'val_tot_loss']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-
+    writer = SummaryWriter()
+    
+    train_transforms, validation_transforms = get_transforms()
     train_dataset = SN8Dataset(train_csv,
                             data_to_load=["preimg","postimg","flood"],
-                            img_size=img_size)
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, shuffle=True, num_workers=2, batch_size=batch_size)
+                            img_size=img_size,
+                            train_transforms=train_transforms)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, shuffle=True, num_workers=4, batch_size=batch_size)
     val_dataset = SN8Dataset(val_csv,
                             data_to_load=["preimg","postimg","flood"],
-                            img_size=img_size)
-    val_dataloader = torch.utils.data.DataLoader(val_dataset, num_workers=2, batch_size=batch_size)
+                            img_size=img_size,
+                            validation_transforms=validation_transforms)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, num_workers=4, batch_size=batch_size)
 
     #model = models["resnet34"](num_classes=5, num_channels=6)
     if model_name == "unet_siamese":
@@ -138,7 +152,8 @@ if __name__ ==  "__main__":
     model.cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=40, gamma=0.5)
-    
+    scaler = torch.cuda.amp.GradScaler(enabled=config.MIXED_PRECISION)
+
     if class_weights is None:
         celoss = nn.CrossEntropyLoss()
     else:
@@ -170,23 +185,30 @@ if __name__ ==  "__main__":
             flood = np.argmax(flood, axis = 1) # this is needed for cross-entropy loss. 
 
             flood = torch.tensor(flood).cuda()
+            
+            with torch.cuda.amp.autocast(enabled=config.MIXED_PRECISION):
+                # flood_pred = model(combinedimg) # this is for resnet34 with stacked preimg+postimg input
+                flood_pred = model(preimg, postimg) # this is for siamese resnet34 with stacked preimg+postimg input
 
-            # flood_pred = model(combinedimg) # this is for resnet34 with stacked preimg+postimg input
-            flood_pred = model(preimg, postimg) # this is for siamese resnet34 with stacked preimg+postimg input
+                #y_pred = F.sigmoid(flood_pred)
+                #focal_l = focal(y_pred, flood)
+                #dice_soft_l = soft_dice_loss(y_pred, flood)
+                #loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
+                loss = celoss(flood_pred, flood.long())
 
-            #y_pred = F.sigmoid(flood_pred)
-            #focal_l = focal(y_pred, flood)
-            #dice_soft_l = soft_dice_loss(y_pred, flood)
-            #loss = (focal_loss_weight * focal_l + soft_dice_loss_weight * dice_soft_l)
-            loss = celoss(flood_pred, flood.long())
-
-            train_loss_val+=loss
+                train_loss_val+=loss
             #train_focal_loss += focal_l
             #train_soft_dice_loss += dice_soft_l
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             print(f"    {str(np.round(i/len(train_dataloader)*100,2))}%: TRAIN LOSS: {(train_loss_val*1.0/(i+1)).item()}", end="\r")
+            n_iter = epoch * len(train_dataloader) + i
+            writer.add_scalar("training_loss_step", train_loss_val, n_iter)
+            if i == 0 and epoch == 0:
+                writer.add_graph()
+        
         print()
         train_tot_loss = (train_loss_val*1.0/len(train_dataloader)).item()
         #train_tot_focal = (train_focal_loss*1.0/len(train_dataloader)).item()
@@ -194,6 +216,7 @@ if __name__ ==  "__main__":
         current_lr = scheduler.get_last_lr()[0]
         scheduler.step()
         train_metrics = {"lr":current_lr, "train_tot_loss":train_tot_loss}
+        log_to_tensorboard(writer, train_metrics, epoch)
 
         # validation
         model.eval()
@@ -248,6 +271,8 @@ if __name__ ==  "__main__":
         val_metrics = {"val_tot_loss":val_tot_loss}
 
         write_metrics_epoch(epoch, fieldnames, train_metrics, val_metrics, training_log_csv)
+        log_to_tensorboard(writer, val_metrics, epoch)
+   
 
         save_model_checkpoint(model, checkpoint_model_path)
 

@@ -1,0 +1,1 @@
+python train_foundation_features.py --train_csv areas_of_interest/sn8_data_train.csv --val_csv areas_of_interest/sn8_data_val.csv --save_dir log_dir/foundation --model_name resnet34 --lr 0.0001 --batch_size 2 --n_epochs 50 --gpu 0

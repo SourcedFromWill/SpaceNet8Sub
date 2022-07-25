@@ -1,8 +1,6 @@
 import csv
 import copy
-from re import A
 from typing import List, Tuple
-from cv2 import transform
 
 from osgeo import gdal
 import numpy as np
@@ -78,15 +76,10 @@ class SN8Dataset(Dataset):
                     ds = gdal.Open(filepath)
                 image = ds.ReadAsArray()
                 ds = None
-                # if len(image.shape)==2: # add a channel axis if read image is only shape (H,W).
-                #     returned_data.append(torch.unsqueeze(torch.from_numpy(image), dim=0).float())
-                # else:
-                #     returned_data.append(torch.from_numpy(image).float())
-                
                 if len(image.shape)==2: 
-                    image = np.expand_dims(image, axis=0)                
-                returned_data[i] = image.transpose()
-            
+                    image = np.expand_dims(image, axis=0)  
+                # H W C -> C H W
+                returned_data[i] = image.transpose(1, 2, 0)
             else:
                 returned_data[i] = None
 
@@ -97,7 +90,8 @@ class SN8Dataset(Dataset):
             if returned_data[key] is not None:
                 returned_data[key] = torch.from_numpy(returned_data[key]).float().permute(2,0,1)
             else:
-                returned_data[key] = None
+                # Necessary as default collate_fn dosen't handle None
+                returned_data[key] = 0
 
         out = (returned_data["preimg"], 
                 returned_data["postimg"],
@@ -156,13 +150,14 @@ if __name__ == "__main__":
     transforms = [RandomCrop(512, 512, always_apply=True), Normalize()]
 
     train_dataset = SN8Dataset("areas_of_interest/sn8_data_train.csv",
-                            data_to_load=["preimg","postimg","flood"], # ,"building", "road", "roadspeed", "flood"],
+                            data_to_load=["preimg","postimg","flood", "road"], # ,"building", "road", "roadspeed", "flood"],
                             img_size=(1300, 1300),
                             transforms=transforms,
                             )
     
     print(train_dataset[30])
-    # x = torch.utils.data.DataLoader(train_dataset,batch_size=1)
+    
+    x = torch.utils.data.DataLoader(train_dataset, batch_size=1)
 
     # x = transforms(image=None)
 
